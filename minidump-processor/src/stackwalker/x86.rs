@@ -404,34 +404,50 @@ impl Unwind for CONTEXT_X86 {
 
         // .await doesn't like closures, so don't use Option chaining
         let mut frame = None;
-        if frame.is_none() {
-            frame = get_caller_by_cfi(self, callee, grand_callee, stack, modules, syms).await;
+
+        let is_frame_valid = |frame: &Option<StackFrame>| -> bool {
+            if frame.is_none() {
+                return false;
+            }
+
+            let frame = frame.as_ref().unwrap();
+
+            // We now check the frame to see if it looks like unwinding is complete,
+            // based on the frame we computed having a nonsense value. Returning
+            // None signals to the unwinder to stop unwinding.
+
+            // if the instruction is within the first ~page of memory, it's basically
+            // null, and we can assume unwinding is complete.
+            if frame.context.get_instruction_pointer() < 4096 {
+                trace!("instruction pointer was nullish, assuming unwind complete");
+                return false;
+            }
+            // If the new stack pointer is at a lower address than the old,
+            // then that's clearly incorrect. Treat this as end-of-stack to
+            // enforce progress and avoid infinite loops.
+            if frame.context.get_stack_pointer() <= self.esp as u64 {
+                trace!("stack pointer went backwards, assuming unwind complete");
+                return false;
+            }
+
+            true
+        };
+
+        if !is_frame_valid(&frame) {
+            //frame = get_caller_by_cfi(self, callee, grand_callee, stack, modules, syms).await;
         }
-        if frame.is_none() {
-            frame = get_caller_by_frame_pointer(self, callee, stack, modules, syms);
+        if !is_frame_valid(&frame) {
+            //frame = get_caller_by_frame_pointer(self, callee, stack, modules, syms);
         }
-        if frame.is_none() {
+        if !is_frame_valid(&frame) {
             frame = get_caller_by_scan(self, callee, stack, modules, syms).await;
         }
+
+        if !is_frame_valid(&frame) {
+            return None;
+        }
+
         let mut frame = frame?;
-
-        // We now check the frame to see if it looks like unwinding is complete,
-        // based on the frame we computed having a nonsense value. Returning
-        // None signals to the unwinder to stop unwinding.
-
-        // if the instruction is within the first ~page of memory, it's basically
-        // null, and we can assume unwinding is complete.
-        if frame.context.get_instruction_pointer() < 4096 {
-            trace!("instruction pointer was nullish, assuming unwind complete");
-            return None;
-        }
-        // If the new stack pointer is at a lower address than the old,
-        // then that's clearly incorrect. Treat this as end-of-stack to
-        // enforce progress and avoid infinite loops.
-        if frame.context.get_stack_pointer() <= self.esp as u64 {
-            trace!("stack pointer went backwards, assuming unwind complete");
-            return None;
-        }
 
         // Ok, the frame now seems well and truly valid, do final cleanup.
 
